@@ -113,7 +113,13 @@
       "Bash(git config *)",
       "Bash(git init *)",
       "Bash(git branch *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(grep -iE \"^\\\\S+\\\\s+\\(\\\\.env$|node_modules|\\\\.next|scheduled_tasks\\)\")",
+      "Bash(xargs -I{} sh -c 'git show :{} 2>/dev/null')",
+      "Bash(grep -nE \"EAA[A-Za-z0-9]{15,}|AIza[A-Za-z0-9_-]{20,}|ya29\\\\.[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|GOCSPX-[A-Za-z0-9_-]+\")",
+      "Bash(git commit -m ' *)",
+      "Bash(git remote *)",
+      "Bash(git push *)"
     ]
   }
 }
