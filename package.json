@@ -1,0 +1,38 @@
+{
+  "name": "abitare-marketing-dashboard",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "workspaces": [
+    "apps/backend",
+    "apps/frontend"
+  ],
+  "scripts": {
+    "dev:backend": "npm run dev -w apps/backend",
+    "dev:frontend": "npm run dev -w apps/frontend",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:integration": "vitest run --config vitest.integration.config.js",
+    "migrate": "knex migrate:latest --knexfile db/knexfile.js",
+    "migrate:rollback": "knex migrate:rollback --knexfile db/knexfile.js",
+    "migrate:make": "knex migrate:make --knexfile db/knexfile.js",
+    "seed": "knex seed:run --knexfile db/knexfile.js",
+    "etl:dry-run": "node apps/backend/etl/pipeline.js --dry-run",
+    "etl:run": "node apps/backend/etl/pipeline.js",
+    "import:sales": "node apps/backend/etl/importSalesCsv.js",
+    "lint": "eslint .",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^2.1.0",
+    "dotenv": "^16.4.5",
+    "eslint": "^9.9.0",
+    "knex": "^3.1.0",
+    "vitest": "^2.1.0"
+  }
+}
