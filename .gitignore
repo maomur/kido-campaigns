@@ -9,3 +9,7 @@ coverage/
 .DS_Store
 .claude/scheduled_tasks.lock
 .claude/settings.local.json
+
+# CSVs de ventas reales exportados de Odoo (nombres/importes de clientes reales)
+# -- nunca deben subirse al repo, solo se usan localmente para import:sales.
+imports/

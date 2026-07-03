@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('../../apps/backend/connectors/metaAds.js', () => ({
   fetchAllStoresMetaInsights: vi.fn(),
@@ -23,8 +23,18 @@ const { fetchNewOrders } = await import('../../apps/backend/connectors/odoo.js')
 const { extractAll } = await import('../../apps/backend/etl/extract.js');
 
 describe('etl/extract', () => {
+  const originalOdooLiveSync = process.env.ODOO_LIVE_SYNC_ENABLED;
+
   beforeEach(() => {
     vi.clearAllMocks();
+    // El acceso real a Odoo (XML-RPC) esta apagado por defecto -- estos tests
+    // cubren el comportamiento de cuando SI se habilita (ver test dedicado
+    // mas abajo para el default apagado).
+    process.env.ODOO_LIVE_SYNC_ENABLED = 'true';
+  });
+
+  afterEach(() => {
+    process.env.ODOO_LIVE_SYNC_ENABLED = originalOdooLiveSync;
   });
 
   it('aggregates results from the 3 connectors when all succeed', async () => {
@@ -65,5 +75,17 @@ describe('etl/extract', () => {
     expect(result.googleRows).toEqual([]);
     expect(result.odooOrders).toEqual([]);
     expect(result.errors).toHaveLength(3);
+  });
+
+  it('skips the Odoo connector by default (ODOO_LIVE_SYNC_ENABLED unset) instead of always failing', async () => {
+    process.env.ODOO_LIVE_SYNC_ENABLED = originalOdooLiveSync;
+    fetchAllStoresMetaInsights.mockResolvedValue([{ campaign_id: '1' }]);
+    fetchAllStoresGoogleAdsPerformance.mockResolvedValue([{ campaign: { id: '2' } }]);
+
+    const result = await extractAll({ since: '2026-06-01', until: '2026-06-01' });
+
+    expect(fetchNewOrders).not.toHaveBeenCalled();
+    expect(result.odooOrders).toEqual([]);
+    expect(result.errors).toEqual([]);
   });
 });

@@ -20,12 +20,26 @@ function isConfirmedRow(row) {
   return VALID_STATE_KEYWORDS.some((keyword) => normalized.includes(keyword));
 }
 
+// Los exports de Odoo a veces incluyen filas sueltas que no son pedidos reales
+// -- por ejemplo notas de "Activities" con salto de linea que Odoo separa en
+// su propia fila del CSV, sin Referencia ni Fecha. Sin este filtro, una sola
+// fila asi tumbaba la importacion completa (Referencia/Fecha vacia rompe el
+// insert en Postgres) en vez de solo omitirse.
+function isRealOrderRow(row) {
+  return Boolean(row.reference && row.dateOrder);
+}
+
 export async function importSalesCsvFile({ filePath, store, db = defaultDb, dryRun = false }) {
   if (!filePath) throw new Error('importSalesCsvFile requiere filePath');
   if (!store) throw new Error('importSalesCsvFile requiere store');
 
   const csvContent = await readFile(filePath, 'utf-8');
-  const rawRows = parseSalesCsv(csvContent).filter(isConfirmedRow);
+  const parsedRows = parseSalesCsv(csvContent);
+  const skippedCount = parsedRows.filter((row) => !isRealOrderRow(row)).length;
+  if (skippedCount > 0) {
+    logger.info(`${skippedCount} fila(s) sin Referencia/Fecha omitida(s) (no son pedidos reales)`);
+  }
+  const rawRows = parsedRows.filter(isRealOrderRow).filter(isConfirmedRow);
   const orderRows = rawRows.map((row) => transformCsvOrder(row, store));
 
   if (dryRun) {

@@ -7,9 +7,20 @@ description: Launch and verify the Abitare Marketing Dashboard (Postgres + Expre
 
 ## Prerequisites
 
-- Docker Desktop must be running (`docker info` should not error).
+- Docker Desktop must be running (`docker info` should not error). On Windows the
+  Docker Desktop *application* itself is often not running yet (not just the
+  container) — if `docker info` errors with a pipe/engine-not-found message, launch
+  it and poll until ready before anything else:
+  ```powershell
+  Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+  ```
+  ```bash
+  timeout 120 bash -c 'until docker info >/dev/null 2>&1; do sleep 3; done; echo ready'
+  ```
 - `.env` exists at repo root (`cp .env.example .env` if not, then fill credentials —
-  see `docs/architecture.md`). `DRY_RUN=true` by default, safe with no credentials.
+  see `docs/architecture.md`). Real credentials are wired up with
+  **`DRY_RUN=false`** — the daily cron and the manual sync both write real data.
+  Don't assume dry-run mode; check `.env` directly if unsure.
 
 ## Launch sequence
 
@@ -24,6 +35,8 @@ npm run migrate
 
 # 3. Backend (Express, :3001) — run in background
 node apps/backend/server.js &
+# on startup it also activates the daily sync scheduler (cron, default 6am) --
+# check the boot log line "ETL programado activo" to confirm DRY_RUN state
 
 # 4. Frontend (Next.js, :3000) — run in background
 cd apps/frontend && npm run dev &
@@ -43,6 +56,8 @@ curl -s http://localhost:3001/api/health
 curl -s "http://localhost:3001/api/kpis/summary?from=2026-06-01&to=2026-06-30"
 curl -s "http://localhost:3001/api/kpis/platform-comparison?from=2026-06-01&to=2026-06-30"
 curl -s http://localhost:3000/ | head -c 200   # SSR should include "Abitare Marketing Dashboard"
+# force a fresh sync on demand (same as the "Actualizar datos" button):
+curl -s -X POST http://localhost:3001/api/sync/run
 ```
 
 For a real visual check (the dashboard is a Tremor/Tailwind UI — compiling without
@@ -61,12 +76,16 @@ npm install -D playwright && npx playwright install chromium
 ```
 
 The dashboard is a single stacked page with 5 "Niveles" (see `CLAUDE.md` for the
-full Nivel → component → API route table): Nivel 1 (`ExecutiveKpiCards`), Nivel 2
-(`PlatformComparisonTable` + donuts), Nivel 3 (`EvolutionCharts`, día/semana toggle),
-Nivel 4 (`CampaignsTable`, paginated client-side at 20 rows/page — click "Siguiente"
-in a screenshot check to confirm pagination works, not just that page 1 renders),
+full Nivel → component → API route table): Nivel 1 (`ExecutiveKpiCards`, 7 cards
+including "Reportadas por Meta/Google" in amber), Nivel 2 (`PlatformComparisonTable`
++ donuts), Nivel 3 (`EvolutionCharts`, día/semana toggle), Nivel 4 (`CampaignsTable`
+— sortable via column-header click, searchable by name, sticky header, paginated
+client-side at 20 rows/page with "Confirmadas"/"Reportadas" and "Ingresos"/"Ing.
+reportados" shown side by side in amber vs. default — click "Siguiente" in a
+screenshot check to confirm pagination works, not just that page 1 renders),
 Nivel 6 (`DiagnosticKpiCards`). Nivel 5 (funnel) and a profit level are intentionally
-not built yet.
+not built yet. There's also a "Actualizar datos" button top-right (`SyncButton.jsx`)
+that triggers `POST /api/sync/run` and refetches the whole page on success.
 
 **Also check data plausibility, not just rendering** — a page can render perfectly
 and still show wrong numbers (see the duplicate-rows gotcha below, which threw no
@@ -122,6 +141,29 @@ in the DB).
   With a small CSV-imported order sample this gap is common. Confirm via
   `SELECT confidence, ad_performance_id FROM attribution WHERE order_id = ...`
   before treating it as a rendering/query bug.
+- **"Reportadas" (Nivel 1/4, amber) looking high while real sales stay flat is
+  probably a live-site tracking problem, not a dashboard bug** — confirmed
+  2026-07-03: Meta's own `conversions_value` is `0.00` for every month of the
+  entire 6-month history on both stores, and `lux_kids` shows an implausible
+  volume relative to spend. Points to the Meta Pixel/Conversions API firing
+  Purchase without a value on the live site (not fixable from this repo). Check
+  `SELECT date_trunc('month', date), sum(conversions), sum(conversions_value)
+  FROM ad_performance WHERE platform='meta' GROUP BY 1, store ORDER BY 1` before
+  trusting "Reportadas" as a real signal.
+- **Real Odoo order imports come back with `utm_campaign`/`utm_source` empty on
+  every row** — confirmed on a real 80-order CSV, not a CSV/column-naming issue
+  (the field names `Campaign/Campaign Name` / `Source/Source Name` are correct
+  and already recognized). Root cause: Odoo's native UTM capture only fires on
+  Odoo's own Website pages, and Abitare's real storefront is Locomotive/Elastic
+  — that capture never triggers. Real fix is outside this repo (checkout needs
+  to pass UTM params to Shopinvader explicitly). Save real sales CSVs under
+  `imports/` (gitignored — they contain customer names/order totals) when
+  importing, never commit them directly.
+- **Dashboard's default date range ends *yesterday*, not today** — deliberate,
+  so it matches what a human sees in Ads Manager (today's numbers are still
+  accruing). If asked to compare a dashboard number against Ads Manager,
+  confirm both are looking at the same closed date range before concluding
+  there's a discrepancy.
 
 See `CLAUDE.md` and `docs/architecture.md` for the full architecture and connector-level
 gotchas (Meta Ads `time_increment`, Google Ads auth/library bugs, Postgres date

@@ -5,12 +5,17 @@
 1. **Captura de tracking** (`apps/frontend/public/tracking.js`): al aterrizar un
    usuario en el frontend Locomotive/Elastic de cualquiera de las 3 tiendas, el
    script captura `utm_*`/`fbclid`/`gclid` de la URL y los persiste en
-   `sessionStorage`. Al llegar al checkout, los inyecta como campos ocultos en
-   el formulario de pedido (ver `docs/odoo-custom-fields.md`) — esto alimenta
-   los campos custom `fbclid`/`gclid` si en el futuro se habilita el acceso via
-   API. Los campos `Campaña`/`Origen` que sí se usan hoy (ver mas abajo) los
-   captura Odoo de forma nativa via cookies de sesion cuando la URL trae
-   `?utm_campaign=...&utm_source=...`, sin depender de este script.
+   `sessionStorage`, para inyectarlos como campos ocultos en el checkout. **Esto
+   describe la intencion original, no el estado real confirmado 2026-07-02**:
+   un export real de 80 pedidos vino con `Campaña`/`Origen` vacios en el 100%
+   de las filas. La suposicion de que Odoo captura esos campos de forma nativa
+   via cookie de sesion **no aplica aqui** — esa captura de Odoo solo se activa
+   cuando el visitante navega las paginas del modulo Website propio de Odoo, y
+   el storefront real de Abitare es Locomotive/Elastic, no el Website de Odoo;
+   Odoo solo entra en juego al final via la API de Shopinvader, para cuando ya
+   no hay sesion de Odoo que capturar nada. Ver el gotcha "UTM capture gap" mas
+   abajo para el detalle completo y que se necesita para arreglarlo (cambio en
+   el checkout real + Shopinvader, fuera del alcance de este repo).
 
 2. **Extraccion** (`apps/backend/etl/extract.js`): en paralelo (`Promise.allSettled`,
    un fallo en un conector no bloquea a los otros), se extraen:
@@ -97,7 +102,14 @@ manual de CSV**, no la conexion automatica en vivo:
      extraido con `time_increment=1`, ver nota mas abajo)
    - `getSpendBreakdown` -> `GET /api/kpis/breakdown?store=&from=&to=`
    - `getCampaigns` -> `GET /api/campaigns?store=&platform=&from=&to=` (incluye
-     `cpa` por campana)
+     `cpa`, y por campana tanto `attributedOrders`/`revenue` -- confirmados via
+     Odoo -- como `reportedConversions`/`reportedRevenue` -- crudos de la
+     plataforma, sin confirmar, ver seccion "Confirmadas vs Reportadas" en
+     `CLAUDE.md`)
+   - `POST /api/sync/run` -> dispara el pipeline ETL completo bajo demanda
+     (`api/routes/sync.js`), usado por el boton "Actualizar datos" del
+     dashboard; lock en memoria (`isRunning`) devuelve 409 si ya hay una
+     corrida en curso.
 
    `/api/orders` sigue como stub (Fase 6).
 
@@ -111,8 +123,13 @@ manual de CSV**, no la conexion automatica en vivo:
 
 9. **Orquestacion**: `apps/backend/etl/pipeline.js` ejecuta extract -> transform
    -> load -> attribution, respetando `DRY_RUN`. El scheduler
-   (`apps/backend/scheduler/jobs.js`, Fase 6) lo dispara diariamente via
-   `node-cron`.
+   (`apps/backend/scheduler/jobs.js`) esta activo -- `server.js` lo arranca en
+   el boot (`scheduleDailySync()`), corre diario segun `SYNC_CRON_SCHEDULE`
+   (default `0 6 * * *`), y captura errores por corrida sin tumbar el proceso.
+   Solo escribe datos reales si `DRY_RUN=false`. Como el backend corre en una
+   maquina local (no un servidor 24/7), la corrida de las 6am solo dispara si
+   el proceso esta activo en ese momento -- sin garantia si la maquina esta
+   apagada o el proceso no esta corriendo.
 
 ### Notas de implementacion (Fase 5)
 
@@ -242,22 +259,60 @@ manual de CSV**, no la conexion automatica en vivo:
   sola campana breve (marzo 2026) y `lux_living` no tiene actividad en Google
   Ads en el rango sincronizado — ambos son datos reales, no errores.
 
+- **UTM capture gap: pedidos reales de Odoo llegan sin `Campaña`/`Origen`**
+  (verificado 2026-07-02, 80 pedidos reales de `bcn_kids`): la captura nativa
+  de UTM de Odoo (`utm.mixin`) solo se activa cuando el cliente navega por las
+  paginas propias del modulo Website de Odoo -- ahi es donde Odoo pone una
+  cookie de sesion al ver `?utm_campaign=...` en la URL. El storefront real de
+  Abitare es Locomotive/Elastic, no el Website de Odoo; Odoo solo entra en
+  juego al final, cuando Shopinvader crea el pedido via API -- el cliente
+  nunca paso por una pagina de Odoo, asi que esa cookie/captura nunca se
+  dispara. No es un problema de configuracion de Odoo ni del CSV: requiere que
+  el checkout de Locomotive/Elastic lea `utm_source`/`utm_campaign` de la URL
+  (mismo patron que `apps/frontend/public/tracking.js` de este repo) y los
+  envie explicitamente a Shopinvader al crear el pedido -- cambio en el sitio
+  en vivo, fuera del alcance de este repo. Mientras tanto, pedidos reales
+  importados via CSV quedaran mayormente como organicos/sin atribuir
+  (`confidence = 'none'`), lo cual es esperado, no un bug.
+- **Las "conversiones" que reporta Meta pueden no ser ventas reales -- Purchase
+  Pixel probablemente mal configurado en el sitio en vivo** (verificado
+  2026-07-03): `sum(conversions_value)` es `0.00` para *todos* los meses del
+  historico completo, en `bcn_kids` y `lux_kids` por igual, y `lux_kids`
+  reporta un volumen de "compras" implausible frente al gasto (321 en una
+  semana con solo 481€ de gasto, CPA menor a 2€ -- imposible para muebles/
+  articulos de bebe). Descartado como bug de agregacion (sin filas duplicadas,
+  `transformMetaRow` filtra correctamente `action_type === 'purchase'`). Señala
+  que el evento Purchase del Pixel/Conversions API de Meta en el sitio real
+  se dispara sin parametro `value`/`currency` (error de integracion comun), y
+  posiblemente con mas frecuencia de la debida en `lux_kids`. No es arreglable
+  desde este repo -- revisar con quien administra el Pixel/CAPI del sitio en
+  vivo (Events Manager -> Test Events / Diagnostics).
+- **El rango de fechas por defecto del dashboard termina ayer, no hoy**
+  (`apps/frontend/app/page.jsx#defaultDateRange`): incluir el dia de hoy hacia
+  que el dashboard nunca coincidiera con Meta/Google Ads Manager, porque el
+  gasto/conversiones del dia en curso todavia se estan acumulando y las
+  plataformas tampoco lo muestran como un dia cerrado en sus paneles.
+  Verificado contra una campana real (`TRAFICO TIENDAS DTS`): incluyendo hoy
+  mostraba 275€ vs 269€ en Ads Manager; excluyendolo dio 269.55€, calce casi
+  exacto. Si vuelve a reportarse un desfase con Ads Manager, verificar primero
+  el rango de fechas exacto antes de asumir un bug de datos.
+
 ## Estado de implementacion
 
 | Componente                          | Estado                                    |
 |--------------------------------------|--------------------------------------------|
 | Tracking (frontend + Odoo)           | Implementado                                |
 | Conectores Meta/Google Ads           | Implementado (dry-run + tests)              |
-| Conector Odoo XML-RPC                | Implementado, sin usar (falta acceso backend) |
-| Import CSV de pedidos (en uso)       | Implementado (tests + validado con Postgres real) |
+| Conector Odoo XML-RPC                | Implementado, apagado por `ODOO_LIVE_SYNC_ENABLED=false` (falta acceso backend) |
+| Import CSV de pedidos (en uso)       | Implementado (tests + validado con Postgres real); primer import real 2026-07-02 (80 pedidos `bcn_kids`), sin UTM -- ver gotcha |
 | Base de datos / ETL                  | Implementado (dry-run + tests)              |
 | Motor de atribucion                  | Implementado (tests, validado con Postgres real) |
-| Meta Ads: conexion real               | Implementado y validado (credenciales reales, 3 tiendas) |
+| Meta Ads: conexion real               | Implementado y validado (credenciales reales, 3 tiendas). Conversiones reportadas del Pixel parecen no confiables -- ver gotcha |
 | Google Ads: conexion real             | Implementado y validado (credenciales reales, 3 tiendas) |
-| API REST — summary/platform-comparison/timeseries/breakdown/campaigns | Implementado, validado con datos reales |
+| API REST — summary/platform-comparison/timeseries/breakdown/campaigns/sync | Implementado, validado con datos reales |
 | API REST — orders/conversions        | Stub (Fase 6)                               |
-| Dashboard (`apps/frontend/app/`)     | Implementado: Niveles 1-4 y 6 (vision ejecutiva, comparativa de canal, evolucion, campanas paginadas, diagnostico). Nivel 5 (funnel) y beneficio estimado fuera de alcance |
-| Scheduler / alertas                  | Stub (Fase 6)                               |
+| Dashboard (`apps/frontend/app/`)     | Implementado: Niveles 1-4 y 6 (vision ejecutiva, comparativa de canal, evolucion, campanas ordenables/buscables/paginadas con encabezado fijo, diagnostico), boton de sincronizacion manual, distincion Confirmadas/Reportadas. Nivel 5 (funnel) y beneficio estimado fuera de alcance |
+| Scheduler / alertas                  | Sync automatico implementado (cron diario + `DRY_RUN=false`); alertas (email/Slack por umbral de ROAS) sin construir |
 
 Ver el checklist de proximos pasos (Docker, credenciales reales) en el
 `README.md` de la raiz del repo.

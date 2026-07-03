@@ -41,9 +41,11 @@ npm run dev:frontend          # Next.js dashboard on :3000 (calls NEXT_PUBLIC_AP
 Store keys used throughout the codebase (env vars, `orders.store`, `ad_performance.store`):
 `bcn_kids`, `lux_kids`, `lux_living`.
 
-### Real-credentials status (as of 2026-07-02)
+### Real-credentials status (as of 2026-07-03)
 
 - **Meta Ads**: connected, loading real 6-month history for all 3 stores.
+  `DRY_RUN=false` in `.env` — the daily cron (6am) and the manual "Actualizar
+  datos" button both write real data now, not just one-off manual runs.
 - **Google Ads**: connected for all 3 stores. `lux_kids`/`lux_living` were
   initially `USER_PERMISSION_DENIED` — root cause was **wrong customer IDs in
   `.env`** (copied from a personal Google account's account selector, which
@@ -58,7 +60,31 @@ Store keys used throughout the codebase (env vars, `orders.store`, `ad_performan
   not a bug.
 - **Odoo**: no backend access; orders come from manual CSV import only (see
   below). `.env` has all credential slots — check `GOOGLE_ADS_*`/`META_*` are
-  actually filled before assuming dry-run/fixture mode.
+  actually filled before assuming dry-run/fixture mode. `ODOO_LIVE_SYNC_ENABLED`
+  defaults to `false` — `etl/extract.js#extractAll` skips the Odoo XML-RPC
+  attempt entirely instead of calling it and letting it fail every run (it
+  always errored `Not Found`, since that access doesn't exist yet). Flip to
+  `true` only once real backend access to Odoo is granted. First real
+  (non-test) CSV import landed 2026-07-02: 80 `bcn_kids` orders, 2026-06-20 to
+  07-02 — see the UTM capture gap note below, every one of those orders came
+  back with `utm_campaign`/`utm_source` empty, not a CSV/import bug.
+
+### Automatic sync
+
+`apps/backend/server.js` calls `scheduleDailySync()` on startup
+(`apps/backend/scheduler/jobs.js`, `node-cron`, schedule from
+`SYNC_CRON_SCHEDULE`, default `0 6 * * *`) — runs the full ETL pipeline
+(Meta + Google Ads only, per `ODOO_LIVE_SYNC_ENABLED` above) once a day.
+Requires `DRY_RUN=false` in `.env`, otherwise it runs but writes nothing.
+There's also a manual trigger: `POST /api/sync/run`
+(`apps/backend/api/routes/sync.js`), surfaced in the dashboard as the
+"Actualizar datos" button (`components/SyncButton.jsx`) — runs the same
+pipeline on demand and refetches the dashboard on success. Both paths share
+an in-memory `isRunning` lock (single-process app, no queue) so concurrent
+runs 409 instead of racing. Since this all runs on a local machine, not a
+hosted server, the 6am sync only fires if the backend process happens to be
+running at that moment — there is no 24/7 guarantee without deploying it
+somewhere.
 
 ## Architecture
 
@@ -85,12 +111,35 @@ general backend/XML-RPC account. Because of that:
   path that can populate `fbclid`/`gclid` for high-confidence attribution.
 - `connectors/salesCsvImport.js` (**in use**) parses a manually-exported CSV from
   Odoo's Sales list view, one file per store, run via `npm run import:sales`. It
-  relies on Odoo's native `utm.mixin` fields (Campaign/Source — visible in the
-  export without any custom fields or admin access), which only support
+  relies on Odoo's native `utm.mixin` fields (Campaign/Source), which only support
   medium/low-confidence attribution, not direct-click.
 - Because of this, `orders` upserts key on `(store, odoo_name)`, not `odoo_id`
   (CSV imports have no Odoo internal ID) — see migration
   `20260701000005_alter_orders_for_csv_import.js`.
+- The export field is named exactly **"Campaign/Campaign Name"** and
+  **"Source/Source Name"** in Odoo's export field picker (search "Campaign" /
+  "Source" in "Available fields") — both are already in
+  `salesCsvImport.js#FIELD_ALIASES`, so no extra config needed there. Also add
+  the plain order **Status** field (not "Invoice Status", which is a different
+  field) if you want quote/cancelled rows filtered automatically.
+- **Real exported orders currently come back with `Campaign`/`Source` empty on
+  every row** — confirmed 2026-07-02 on a real 80-order export. Root cause:
+  Odoo's automatic UTM capture only fires when the customer browses Odoo's own
+  Website module pages (session cookie set client-side by Odoo). Abitare's real
+  storefront is Locomotive/Elastic, not Odoo's website — customers never hit an
+  Odoo-served page until Shopinvader's API creates the order, so that capture
+  never triggers. Getting real Campaign/Source data requires the storefront's
+  checkout to read UTM params from the URL itself (same idea as this repo's own
+  `apps/frontend/public/tracking.js`) and pass them to Shopinvader explicitly —
+  a change on the live site/Shopinvader integration, not something fixable from
+  this repo or from Odoo's admin settings.
+- `etl/importSalesCsv.js#isRealOrderRow` skips CSV rows with a blank
+  Reference/Date before importing — Odoo's export sometimes emits a stray row
+  for a multi-line "Activities" note with no order data, which would otherwise
+  break the whole batch insert.
+- **Real sales CSVs contain customer PII (names, order totals) — keep them out
+  of git.** Save them under `imports/` at the repo root (gitignored) when
+  importing; never commit a CSV export directly.
 
 ### Attribution confidence tiers (`attribution/engine.js`)
 
@@ -131,11 +180,29 @@ sanity-checking numbers (see the Nivel 1 vs. Nivel 2/4 gotcha below).
 
 | Nivel | Contenido | Componente | Ruta API |
 |-------|-----------|------------|----------|
-| 1 — Visión ejecutiva | Gasto, Ingresos atribuidos, ROAS, Compras, CPA, Ticket medio | `ExecutiveKpiCards.jsx` | `GET /api/kpis/summary` |
+| 1 — Visión ejecutiva | Gasto, Ingresos atribuidos, ROAS, CPA, Compras confirmadas, Reportadas por Meta/Google, Ticket medio | `ExecutiveKpiCards.jsx` | `GET /api/kpis/summary` |
 | 2 — Comparativa de canal | Meta Ads vs Google Ads (spend/revenue/CPA/ROAS) + donuts por tienda/plataforma | `PlatformComparisonTable.jsx`, `SpendBreakdownCharts.jsx` | `GET /api/kpis/platform-comparison`, `GET /api/kpis/breakdown` |
 | 3 — Evolución temporal | Gasto vs. ingresos y ROAS por día/semana (toggle) | `EvolutionCharts.jsx` | `GET /api/kpis/timeseries?granularity=day\|week` |
-| 4 — Campañas | Ranking de campañas: Campaña / Plataforma / Tienda / Gasto / Ingresos / Compras / CPA / ROAS, paginado client-side a 20 filas | `CampaignsTable.jsx` | `GET /api/campaigns` |
+| 4 — Campañas | Ranking ordenable (click en cualquier encabezado)/buscable por nombre: Campaña (con viñeta M/G de plataforma) / Gasto / Impresiones / Alcance / Confirmadas / Reportadas / Ingresos / Ing. reportados / ROAS, paginado client-side a 20 filas, encabezado fijo (sticky) al hacer scroll | `CampaignsTable.jsx` | `GET /api/campaigns` |
 | 6 — Diagnóstico | CTR, CPC, CPM, Frecuencia, Tasa de conversión (calidad de anuncio, no resultado de negocio) | `DiagnosticKpiCards.jsx` | `GET /api/kpis/summary` (reuses the same payload as Nivel 1) |
+
+**"Confirmadas" vs. "Reportadas" (Nivel 1 and Nivel 4)**: every count of
+purchases/conversions in this dashboard is one of exactly two kinds, and they are
+deliberately never merged into a single number:
+- **Confirmadas** (`attributedOrders`) — real, confirmed Odoo orders that the
+  attribution engine matched to a specific campaign. This is the trustworthy
+  number everything else (CPA, ROAS revenue) is built on.
+- **Reportadas** / **Ing. reportados** (`reportedConversions`/`reportedRevenue`,
+  from `ad_performance.conversions`/`conversions_value`) — the raw "purchase"
+  action count/value the ad platform itself claims, independent of any real
+  order match. Shown with an amber accent (`decorationColor="amber"` in
+  `ExecutiveKpiCards.jsx`, `text-amber-700` in `CampaignsTable.jsx`) specifically
+  so it reads as a different trust tier at a glance, not as a variant of the same
+  metric. Useful while Odoo order data lags or is incomplete (see UTM capture gap
+  below) to sanity-check that a platform's pixel/tag is firing at all — but it can
+  be inflated (duplicate fires, probabilistic/view-through matching, or a
+  misconfigured pixel — see the zero-value Meta Purchase gotcha below) and must
+  never be presented as if it were a confirmed sale.
 
 **Nivel 1's revenue/compras total will not always match the sum of Nivel 2/4's
 revenue/compras** — this is expected, not a bug. Nivel 1 (`getSummaryKpis`) counts
@@ -150,6 +217,32 @@ before assuming it's a display bug.
 
 ### Known gotchas (see full detail in `docs/architecture.md`)
 
+- **Meta's "purchase" conversions are real numbers from the API but likely
+  reflect a broken Pixel on the live site, not real sales.** Verified
+  2026-07-03: `SELECT date_trunc('month', date), sum(conversions),
+  sum(conversions_value) FROM ad_performance WHERE platform='meta' AND
+  store='lux_kids' GROUP BY 1` shows `conversions_value = 0.00` for **every
+  single month of the full 6-month history**, across both `lux_kids` and
+  `bcn_kids`. A real Purchase event fired on an actual order should almost
+  always carry a non-zero value. `lux_kids` in particular shows an implausible
+  volume (321 "purchases" against 481€ of spend in one week — under 2€ CPA,
+  impossible for furniture/baby gear). This isn't an aggregation bug (checked:
+  no duplicate rows, `transformMetaRow` correctly filters
+  `action_type === 'purchase'` only) — it points to the live site's Meta
+  Pixel/Conversions API firing the Purchase event without a `value`/`currency`
+  parameter (common integration mistake), and possibly over-firing for
+  `lux_kids`. Not fixable from this repo — flag it for whoever manages Meta
+  Pixel/CAPI on the live site, alongside the Odoo UTM gap below (check Meta
+  Events Manager → Test Events / Diagnostics to confirm).
+- **`apps/frontend/app/page.jsx#defaultDateRange` ends *yesterday*, not
+  today, on purpose.** Including today made the dashboard's default view
+  never match what a human sees in Meta/Google Ads Manager, because today's
+  spend/conversions are still accruing and ad platforms typically don't show
+  the current (incomplete) day as a closed one either. Verified against a
+  real campaign (`TRAFICO TIENDAS DTS`): including today showed 275€ vs. 269€
+  in Ads Manager; excluding it landed at 269.55€ (~270€), matching almost
+  exactly. If a "the numbers don't match Ads Manager" report comes in again,
+  check the exact date range being compared before assuming a data bug.
 - **`ad_performance` NULL `adset_id`/`ad_id` silently breaks upsert idempotency.**
   Meta's `level='campaign'` fetch has no adset/ad granularity, so those columns are
   `null` — and Postgres never treats two `NULL`s as equal in a unique index, so the

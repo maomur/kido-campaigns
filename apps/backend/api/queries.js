@@ -219,8 +219,10 @@ export async function getCampaigns(db, { store, platform, from, to }) {
     .select('platform', 'store', 'campaign_id', 'campaign_name')
     .sum({ spend: 'spend' })
     .sum({ impressions: 'impressions' })
+    .sum({ reach: 'reach' })
     .sum({ clicks: 'clicks' })
     .sum({ reportedConversions: 'conversions' })
+    .sum({ reportedRevenue: 'conversions_value' })
     .groupBy('platform', 'store', 'campaign_id', 'campaign_name');
   if (store) campaignsQuery.andWhere({ store });
   if (platform) campaignsQuery.andWhere({ platform });
@@ -264,8 +266,10 @@ export async function getCampaigns(db, { store, platform, from, to }) {
         campaignName: row.campaign_name,
         spend,
         impressions: Number(row.impressions) || 0,
+        reach: Number(row.reach) || 0,
         clicks: Number(row.clicks) || 0,
         reportedConversions: Number(row.reportedConversions) || 0,
+        reportedRevenue: Number(row.reportedRevenue) || 0,
         revenue: rev.revenue,
         attributedOrders: rev.attributedOrders,
         cpa: calculateCPA(spend, rev.attributedOrders),

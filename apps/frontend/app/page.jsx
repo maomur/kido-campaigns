@@ -15,6 +15,7 @@ import SpendBreakdownCharts from '../components/SpendBreakdownCharts.jsx';
 import EvolutionCharts from '../components/EvolutionCharts.jsx';
 import CampaignsTable from '../components/CampaignsTable.jsx';
 import DiagnosticKpiCards from '../components/DiagnosticKpiCards.jsx';
+import SyncButton from '../components/SyncButton.jsx';
 
 const STORES = [
   { value: '', label: 'Todas las tiendas' },
@@ -30,7 +31,13 @@ const PLATFORMS = [
 ];
 
 function defaultDateRange() {
-  const to = new Date().toISOString().slice(0, 10);
+  // Termina ayer, no hoy: el dia en curso todavia esta acumulando gasto en
+  // Meta/Google Ads, y sus paneles (Ads Manager, etc.) tampoco lo muestran
+  // como un dia cerrado -- incluir "hoy" aqui hacia que el dashboard nunca
+  // coincidiera exactamente con lo que el usuario ve ahi.
+  const toDate = new Date();
+  toDate.setDate(toDate.getDate() - 1);
+  const to = toDate.toISOString().slice(0, 10);
   const fromDate = new Date();
   fromDate.setDate(fromDate.getDate() - 30);
   return { from: fromDate.toISOString().slice(0, 10), to };
@@ -48,6 +55,7 @@ export default function DashboardPage() {
   const [platforms, setPlatforms] = useState([]);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -80,18 +88,21 @@ export default function DashboardPage() {
     return () => {
       cancelled = true;
     };
-  }, [store, platform, from, to, granularity]);
+  }, [store, platform, from, to, granularity, refreshKey]);
 
   return (
     <main className="p-6 md:p-10 max-w-7xl mx-auto">
-      <Flex justifyContent="start" alignItems="center" className="gap-3">
-        <div className="h-9 w-9 rounded-tremor-default bg-blue-600 flex items-center justify-center text-white font-bold text-sm">
-          A
-        </div>
-        <div>
-          <Title className="text-2xl">Abitare Marketing Dashboard</Title>
-          <Text>KPIs reales de Meta Ads / Google Ads cruzados con pedidos confirmados vía atribución.</Text>
-        </div>
+      <Flex justifyContent="between" alignItems="start" className="flex-wrap gap-3">
+        <Flex justifyContent="start" alignItems="center" className="w-auto gap-3">
+          <div className="h-9 w-9 rounded-tremor-default bg-blue-600 flex items-center justify-center text-white font-bold text-sm">
+            A
+          </div>
+          <div>
+            <Title className="text-2xl">Abitare Marketing Dashboard</Title>
+            <Text>KPIs reales de Meta Ads / Google Ads cruzados con pedidos confirmados vía atribución.</Text>
+          </div>
+        </Flex>
+        <SyncButton onSyncComplete={() => setRefreshKey((k) => k + 1)} />
       </Flex>
 
       <Card className="mt-6">
@@ -158,9 +169,9 @@ export default function DashboardPage() {
 
           <EvolutionCharts series={series} granularity={granularity} onGranularityChange={setGranularity} />
 
-          <CampaignsTable campaigns={campaigns} />
-
           <DiagnosticKpiCards summary={summary} />
+
+          <CampaignsTable campaigns={campaigns} />
         </div>
       )}
     </main>

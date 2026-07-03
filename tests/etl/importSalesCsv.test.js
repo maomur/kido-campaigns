@@ -49,4 +49,21 @@ describe('etl/importSalesCsv', () => {
     await expect(importSalesCsvFile({ store: 'bcn_kids' })).rejects.toThrow('filePath');
     await expect(importSalesCsvFile({ filePath: './ventas.csv' })).rejects.toThrow('store');
   });
+
+  it('skips stray rows without a reference/date instead of failing the whole import', async () => {
+    // Los exports de Odoo a veces incluyen una fila suelta de una nota de
+    // actividad multilinea, sin Referencia ni Fecha -- no es un pedido real.
+    const csvWithStrayRow = [
+      'Referencia del pedido,Fecha de pedido,Total,Campaña/Nombre de campaña,Origen/Nombre de la fuente,Estado',
+      'S00901,2026-06-01 10:00:00,85.00,BCN Kids - Verano 2026,facebook,Pedido de venta',
+      ',,,,,Entregar junto con el pedido S00850',
+    ].join('\n');
+    readFile.mockResolvedValue(csvWithStrayRow);
+    upsertOrders.mockResolvedValue(1);
+
+    const result = await importSalesCsvFile({ filePath: './ventas.csv', store: 'bcn_kids', dryRun: false });
+
+    expect(upsertOrders).toHaveBeenCalledWith(expect.anything(), [expect.objectContaining({ odoo_name: 'S00901' })]);
+    expect(result).toEqual({ ordersCount: 1, dryRun: false });
+  });
 });

@@ -19,6 +19,14 @@ export async function extractAll({ since, until, lastSyncDates = {} }) {
   const customerAccountsMap = parseCustomerAccountsMap(process.env.GOOGLE_ADS_CUSTOMER_ACCOUNTS);
   const websiteStoreMap = parseWebsiteStoreMap(process.env.ODOO_WEBSITE_STORE_MAP);
 
+  // El acceso de Odoo es solo storefront (Shopinvader), no backend/XML-RPC --
+  // connectors/odoo.js siempre fallaria con "Not Found". Se deja apagado por
+  // defecto para que el ETL automatico/manual no reporte un "error" en cada
+  // corrida por algo que ya sabemos que no funciona; los pedidos siguen
+  // entrando via CSV manual (npm run import:sales). Reactivar con
+  // ODOO_LIVE_SYNC_ENABLED=true si en el futuro se consigue acceso real.
+  const odooLiveSyncEnabled = process.env.ODOO_LIVE_SYNC_ENABLED === 'true';
+
   const [metaResult, googleResult, odooResult] = await Promise.allSettled([
     fetchAllStoresMetaInsights({ since, until, adAccountsMap }),
     fetchAllStoresGoogleAdsPerformance({
@@ -27,7 +35,9 @@ export async function extractAll({ since, until, lastSyncDates = {} }) {
       customerAccountsMap,
       client: createGoogleAdsClient(),
     }),
-    fetchNewOrders({ client: buildOdooClient(), lastSyncDate: lastSyncDates.odoo }),
+    odooLiveSyncEnabled
+      ? fetchNewOrders({ client: buildOdooClient(), lastSyncDate: lastSyncDates.odoo })
+      : Promise.resolve([]),
   ]);
 
   const errors = [];
@@ -39,7 +49,7 @@ export async function extractAll({ since, until, lastSyncDates = {} }) {
     logger.error('Fallo extrayendo Google Ads', googleResult.reason);
     errors.push({ connector: 'google', error: googleResult.reason });
   }
-  if (odooResult.status === 'rejected') {
+  if (odooLiveSyncEnabled && odooResult.status === 'rejected') {
     logger.error('Fallo extrayendo pedidos Odoo', odooResult.reason);
     errors.push({ connector: 'odoo', error: odooResult.reason });
   }

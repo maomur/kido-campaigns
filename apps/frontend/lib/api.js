@@ -19,6 +19,15 @@ async function getJson(path) {
   return response.json();
 }
 
+async function postJson(path) {
+  const response = await fetch(`${API_URL}${path}`, { method: 'POST' });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error || `API ${path} respondio ${response.status}`);
+  }
+  return body;
+}
+
 export function fetchSummary(params) {
   return getJson(`/api/kpis/summary${buildQuery(params)}`);
 }
@@ -37,4 +46,8 @@ export function fetchBreakdown(params) {
 
 export function fetchPlatformComparison(params) {
   return getJson(`/api/kpis/platform-comparison${buildQuery(params)}`);
+}
+
+export function triggerSync() {
+  return postJson('/api/sync/run');
 }

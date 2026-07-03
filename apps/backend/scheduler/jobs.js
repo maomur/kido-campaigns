@@ -9,7 +9,13 @@ export function scheduleDailySync() {
   const schedule = process.env.SYNC_CRON_SCHEDULE || '0 6 * * *';
   return cron.schedule(schedule, async () => {
     logger.info('Iniciando ETL programado de marketing...');
-    await runPipeline({});
-    logger.info('ETL programado completado');
+    try {
+      const result = await runPipeline({});
+      logger.info('ETL programado completado', result);
+    } catch (err) {
+      // Un fallo aqui no debe tumbar el servidor -- el proximo disparo del
+      // cron lo vuelve a intentar. Se deja registrado para poder diagnosticar.
+      logger.error('ETL programado fallo', err);
+    }
   });
 }
